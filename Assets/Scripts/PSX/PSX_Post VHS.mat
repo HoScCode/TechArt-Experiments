@@ -1,0 +1,44 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!21 &2100000
+Material:
+  serializedVersion: 8
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_Name: PSX_Post VHS
+  m_Shader: {fileID: 4800000, guid: f9c49be7be3746248b1d373ba3e9f7fe, type: 3}
+  m_Parent: {fileID: 0}
+  m_ModifiedSerializedProperties: 0
+  m_ValidKeywords: []
+  m_InvalidKeywords: []
+  m_LightmapFlags: 4
+  m_EnableInstancingVariants: 0
+  m_DoubleSidedGI: 0
+  m_CustomRenderQueue: -1
+  stringTagMap: {}
+  disabledShaderPasses: []
+  m_LockedProperties: 
+  m_SavedProperties:
+    serializedVersion: 3
+    m_TexEnvs: []
+    m_Ints: []
+    m_Floats:
+    - _AberrationPixels: 0.41
+    - _FluctuationAmount: 0.6
+    - _FluctuationSpeed: 0.5
+    - _NoiseFps: 24
+    - _ScanlineStrength: 0.014
+    - _StripeChance: 0
+    - _StripeHeight: 0.005
+    - _StripeInterval: 4
+    - _StripeNoise: 0.045
+    - _StripeShift: 0.0275
+    - _VignetteStart: 0.535
+    - _VignetteStrength: 0.545
+    - _WobbleSpeed: 1.5
+    - _WobbleStrength: 0.0015
+    m_Colors: []
+  m_BuildTextureStacks: []
+  m_AllowLocking: 1
