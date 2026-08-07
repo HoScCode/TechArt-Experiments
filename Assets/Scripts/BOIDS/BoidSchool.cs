@@ -1,3 +1,18 @@
+// Version: BoidSchool_v106_InstancedRendering
+//
+// v106: Draw-Call-Optimierung.
+//   - Render Mode "Instanced": KEINE GameObjects mehr pro Boid. Die Boids
+//     werden per Graphics.RenderMeshInstanced gezeichnet - 1 Draw Call pro
+//     1023 Boids statt 1-2 pro Boid, und der Main Thread spart sich
+//     tausende Transform-Updates. Mesh + Material im Header "Rendering"
+//     zuweisen (Material braucht 'Enable GPU Instancing' - wird notfalls
+//     automatisch aktiviert). Ohne Mesh wird die Unity-Sphere genutzt;
+//     ein Low-Poly-Mesh (Icosphere ~80 Tris) wird DRINGEND empfohlen.
+//   - Im Instanced-Modus gibt es keine BoidAgent-Instanzen (SetActivity
+//     entfällt); alles andere (Panik, Landen, Folgen, ...) ist identisch.
+//   - GameObject-Modus bleibt verfügbar; dort werden Schatten der Boids
+//     jetzt automatisch deaktiviert (halbiert die Draw Calls).
+//
 // Version: BoidSchool_v105_FollowPlayer
 //
 // v105: "Folgt mir" - der Player wird Leader.
@@ -346,6 +361,24 @@ public class BoidSchool : MonoBehaviour
     [SerializeField, Range(0.5f, 20f)] private float bankResponsiveness = 5f;
 
 
+    [Header("Rendering")]
+
+    [Tooltip("GameObjects = 1 Instanz pro Boid (flexibel, teuer).\nInstanced = Graphics.RenderMeshInstanced, 1 Draw Call pro 1023 Boids, keine Transform-Updates. Empfohlen ab ein paar hundert Boids.")]
+    [SerializeField] private BoidRenderMode renderMode = BoidRenderMode.Instanced;
+
+    [Tooltip("Mesh für den Instanced-Modus. Leer = Unity-Sphere (768 Tris - für viele Boids besser ein Low-Poly-Mesh mit ~80 Tris zuweisen!).")]
+    [SerializeField] private Mesh instancedMesh;
+
+    [Tooltip("Material für den Instanced-Modus. 'Enable GPU Instancing' wird notfalls automatisch aktiviert.")]
+    [SerializeField] private Material instancedMaterial;
+
+    [Tooltip("Grundgröße eines Boids im Instanced-Modus (entspricht der Prefab-Scale im GameObject-Modus).")]
+    [SerializeField] private Vector3 instancedScale = new Vector3(0.35f, 0.35f, 0.35f);
+
+    [Tooltip("Boid-Schatten deaktivieren. Halbiert im GameObject-Modus die Draw Calls; für kleine Schwarmkörper praktisch unsichtbar.")]
+    [SerializeField] private bool disableBoidShadows = true;
+
+
     [Header("Debug")]
 
     [SerializeField] private bool drawHeadings = false;
@@ -409,6 +442,16 @@ public class BoidSchool : MonoBehaviour
     private bool followPlayerActive;
     private Vector3 playerFollowHeading = Vector3.forward; // letzte gültige Bewegungsrichtung
 
+    // Rendering
+    public enum BoidRenderMode { GameObjects, Instanced }
+    private const int InstanceBatchSize = 1023;
+
+    private Quaternion[] visualRotations; // geglättete Darstellungsrotation (beide Modi)
+    private float[] visualScales;         // pro Boid (Leader wird größer)
+    private Matrix4x4[][] instanceBatches;
+    private Mesh resolvedInstancedMesh;
+    private RenderParams instancedRenderParams;
+
     // Ausweich-Sensor (gestaffelt aktualisiert)
     private Vector3[] avoidDirections;
     private float[] avoidUrgencies;
@@ -448,7 +491,7 @@ public class BoidSchool : MonoBehaviour
 
     private void Update()
     {
-        if (agents == null || agents.Length == 0)
+        if (positions == null || positions.Length == 0)
             return;
 
         float deltaTime = Mathf.Min(Time.deltaTime, 0.05f);
@@ -459,6 +502,7 @@ public class BoidSchool : MonoBehaviour
         UpdatePlayerSensing(deltaTime, time);
         UpdateAvoidanceSensors(time);
         Step(deltaTime, time);
+        RenderInstancedBoids();
     }
 
 
@@ -475,7 +519,17 @@ public class BoidSchool : MonoBehaviour
             return;
         }
 
-        if (boidPrefabs == null || boidPrefabs.Length == 0)
+        // Instanced-Setup zuerst: schlägt es fehl (kein Material), fällt
+        // der Modus sauber auf GameObjects zurück - dann greift darunter
+        // der Prefab-Check.
+        if (renderMode == BoidRenderMode.Instanced &&
+            !TrySetupInstancedRendering())
+        {
+            renderMode = BoidRenderMode.GameObjects;
+        }
+
+        if (renderMode == BoidRenderMode.GameObjects &&
+            (boidPrefabs == null || boidPrefabs.Length == 0))
         {
             Debug.LogError("BoidSchool benötigt mindestens ein Boid-Prefab.", this);
             enabled = false;
@@ -513,6 +567,26 @@ public class BoidSchool : MonoBehaviour
         followSlots = new Vector3[count];
         landingSlotsWorld = new Vector3[count];
 
+        visualRotations = new Quaternion[count];
+        visualScales = new float[count];
+
+        if (renderMode == BoidRenderMode.Instanced)
+        {
+            int batchCount =
+                (count + InstanceBatchSize - 1) / InstanceBatchSize;
+
+            instanceBatches = new Matrix4x4[batchCount][];
+
+            for (int b = 0; b < batchCount; b++)
+            {
+                int size = Mathf.Min(
+                    InstanceBatchSize,
+                    count - b * InstanceBatchSize);
+
+                instanceBatches[b] = new Matrix4x4[size];
+            }
+        }
+
         for (int i = 0; i < count; i++)
             panicStartTimes[i] = float.PositiveInfinity;
 
@@ -533,7 +607,6 @@ public class BoidSchool : MonoBehaviour
 
         for (int i = 0; i < count; i++)
         {
-            GameObject prefab = PickPrefab();
             Vector3 position = FindSpawnPosition();
 
             Vector3 heading = Vector3.Slerp(
@@ -569,19 +642,40 @@ public class BoidSchool : MonoBehaviour
             // Sensor-Updates über das Intervall verteilen.
             nextProbeTimes[i] = Time.time + probeInterval * ((float)i / count);
 
-            GameObject instance = Instantiate(
-                prefab,
-                position,
-                Quaternion.LookRotation(heading, Vector3.up),
-                boidRoot);
+            visualRotations[i] = Quaternion.LookRotation(heading, Vector3.up);
+            visualScales[i] = 1f;
 
-            BoidAgent agent = instance.GetComponent<BoidAgent>();
-            if (agent == null)
-                agent = instance.AddComponent<BoidAgent>();
+            if (renderMode == BoidRenderMode.GameObjects)
+            {
+                GameObject prefab = PickPrefab();
 
-            agent.Index = i;
-            agents[i] = agent;
-            agentTransforms[i] = instance.transform;
+                GameObject instance = Instantiate(
+                    prefab,
+                    position,
+                    visualRotations[i],
+                    boidRoot);
+
+                BoidAgent agent = instance.GetComponent<BoidAgent>();
+                if (agent == null)
+                    agent = instance.AddComponent<BoidAgent>();
+
+                agent.Index = i;
+                agents[i] = agent;
+                agentTransforms[i] = instance.transform;
+
+                // Schatten der Boids kosten einen zweiten Draw-Pass pro
+                // Renderer und sind bei kleinen Schwarmkörpern unsichtbar.
+                if (disableBoidShadows)
+                {
+                    foreach (Renderer boidRenderer in
+                             instance.GetComponentsInChildren<Renderer>())
+                    {
+                        boidRenderer.shadowCastingMode =
+                            UnityEngine.Rendering.ShadowCastingMode.Off;
+                        boidRenderer.receiveShadows = false;
+                    }
+                }
+            }
         }
     }
 
@@ -1444,6 +1538,8 @@ public class BoidSchool : MonoBehaviour
 
             float remainingAngle = Vector3.Angle(heading, targetDirection);
 
+            Vector3 previousHeading = heading;
+
             heading = Vector3.RotateTowards(
                 heading,
                 targetDirection,
@@ -1581,10 +1677,8 @@ public class BoidSchool : MonoBehaviour
             speeds[i] = speed;
 
             // ---------------------------------------------------------
-            // Orientierung + Banking
+            // Orientierung + Banking (beide Render-Modi)
             // ---------------------------------------------------------
-            Transform agentTransform = agentTransforms[i];
-
             Vector3 upAxis = Mathf.Abs(Vector3.Dot(heading, Vector3.up)) > 0.96f
                 ? Vector3.forward
                 : Vector3.up;
@@ -1594,8 +1688,9 @@ public class BoidSchool : MonoBehaviour
 
             if (maxBankAngle > 0f)
             {
+                // Gierrate aus der Heading-Änderung dieses Frames.
                 float yawDelta = Vector3.SignedAngle(
-                    agentTransform.forward, heading, Vector3.up);
+                    previousHeading, heading, Vector3.up);
 
                 float yawRate = deltaTime > 0.0001f
                     ? yawDelta / deltaTime
@@ -1617,17 +1712,31 @@ public class BoidSchool : MonoBehaviour
             float rotationBlend =
                 Mathf.Clamp01(orientationResponsiveness * deltaTime);
 
-            agentTransform.SetPositionAndRotation(
-                newPosition,
-                Quaternion.Slerp(
-                    agentTransform.rotation, targetRotation, rotationBlend));
+            visualRotations[i] = Quaternion.Slerp(
+                visualRotations[i], targetRotation, rotationBlend);
 
-            agents[i].SetActivity(
-                separationActivity,
-                panic,   // Slot "Alignment" transportiert das Panik-Level
-                cohesionActivity,
-                avoidUrgencies[i],
-                containmentShaped);
+            if (renderMode == BoidRenderMode.GameObjects)
+            {
+                agentTransforms[i].SetPositionAndRotation(
+                    newPosition, visualRotations[i]);
+
+                agents[i].SetActivity(
+                    separationActivity,
+                    panic,   // Slot "Alignment" transportiert das Panik-Level
+                    cohesionActivity,
+                    avoidUrgencies[i],
+                    containmentShaped);
+            }
+            else
+            {
+                // Instanced: Matrix in den Batch schreiben; gezeichnet wird
+                // gesammelt in RenderInstancedBoids().
+                instanceBatches[i / InstanceBatchSize][i % InstanceBatchSize] =
+                    Matrix4x4.TRS(
+                        newPosition,
+                        visualRotations[i],
+                        instancedScale * visualScales[i]);
+            }
 
             if (drawHeadings)
                 Debug.DrawLine(
@@ -1763,15 +1872,27 @@ public class BoidSchool : MonoBehaviour
             }
 
             leaderIndex = best;
-            leaderBaseScale = agentTransforms[leaderIndex].localScale;
-            agentTransforms[leaderIndex].localScale =
-                leaderBaseScale * leaderScaleMultiplier;
+
+            if (renderMode == BoidRenderMode.GameObjects)
+            {
+                leaderBaseScale = agentTransforms[leaderIndex].localScale;
+                agentTransforms[leaderIndex].localScale =
+                    leaderBaseScale * leaderScaleMultiplier;
+            }
+            else
+            {
+                visualScales[leaderIndex] = leaderScaleMultiplier;
+            }
 
             ForceNewRoamTarget();
         }
         else if (leaderIndex >= 0)
         {
-            agentTransforms[leaderIndex].localScale = leaderBaseScale;
+            if (renderMode == BoidRenderMode.GameObjects)
+                agentTransforms[leaderIndex].localScale = leaderBaseScale;
+            else
+                visualScales[leaderIndex] = 1f;
+
             leaderIndex = -1;
         }
 
@@ -1920,6 +2041,85 @@ public class BoidSchool : MonoBehaviour
         {
             panicStartTimes[i] = float.PositiveInfinity;
             panicEndTimes[i] = 0f;
+        }
+    }
+
+
+    // =====================================================================
+    // Instanced Rendering
+    // =====================================================================
+
+    // Bereitet Mesh, Material und RenderParams vor. false = Fallback auf
+    // GameObjects (z.B. wenn kein Material zugewiesen ist).
+    private bool TrySetupInstancedRendering()
+    {
+        if (instancedMaterial == null)
+        {
+            Debug.LogWarning(
+                "[BoidSchool] Instanced-Modus braucht ein Material im Header " +
+                "'Rendering' - Fallback auf GameObjects.", this);
+            return false;
+        }
+
+        if (!instancedMaterial.enableInstancing)
+        {
+            instancedMaterial.enableInstancing = true;
+            Debug.Log(
+                "[BoidSchool] 'Enable GPU Instancing' wurde auf dem " +
+                "Boid-Material automatisch aktiviert.", this);
+        }
+
+        resolvedInstancedMesh = instancedMesh;
+
+        // Fallback: Unity-Sphere aus einem Wegwerf-Primitive ziehen.
+        if (resolvedInstancedMesh == null)
+        {
+            GameObject temp =
+                GameObject.CreatePrimitive(PrimitiveType.Sphere);
+
+            resolvedInstancedMesh =
+                temp.GetComponent<MeshFilter>().sharedMesh;
+
+            Destroy(temp);
+
+            Debug.Log(
+                "[BoidSchool] Kein Instanced-Mesh zugewiesen - nutze die " +
+                "Unity-Sphere (768 Tris). Für viele Boids lohnt ein " +
+                "Low-Poly-Mesh (~80 Tris) deutlich.", this);
+        }
+
+        Bounds bounds = aquarium.WorldBounds;
+        bounds.Expand(bounds.size.magnitude * 0.1f);
+
+        instancedRenderParams = new RenderParams(instancedMaterial)
+        {
+            worldBounds = bounds,
+            shadowCastingMode = disableBoidShadows
+                ? UnityEngine.Rendering.ShadowCastingMode.Off
+                : UnityEngine.Rendering.ShadowCastingMode.On,
+            receiveShadows = !disableBoidShadows
+        };
+
+        return true;
+    }
+
+    private void RenderInstancedBoids()
+    {
+        if (renderMode != BoidRenderMode.Instanced ||
+            instanceBatches == null ||
+            resolvedInstancedMesh == null)
+        {
+            return;
+        }
+
+        for (int b = 0; b < instanceBatches.Length; b++)
+        {
+            Graphics.RenderMeshInstanced(
+                instancedRenderParams,
+                resolvedInstancedMesh,
+                0,
+                instanceBatches[b],
+                instanceBatches[b].Length);
         }
     }
 

@@ -1016,7 +1016,7 @@ MonoBehaviour:
   boidPrefabs:
   - {fileID: 6428919029684286040, guid: 705d2d870f89aad4ab24a77c027f460b, type: 3}
   boidRoot: {fileID: 1745205676}
-  spawnCount: 300
+  spawnCount: 500
   randomSeed: 12433
   spawnPadding: 1
   agentRadius: 0.18
@@ -1092,6 +1092,11 @@ MonoBehaviour:
   maxBankAngle: 38
   bankPerTurnRate: 0.2
   bankResponsiveness: 5
+  renderMode: 1
+  instancedMesh: {fileID: 0}
+  instancedMaterial: {fileID: 2100000, guid: faef12d3949291546a5e06ce5ce7cc8a, type: 2}
+  instancedScale: {x: 0.1, y: 0.1, z: 0.1}
+  disableBoidShadows: 0
   drawHeadings: 1
   drawAvoidance: 1
   drawRoamTarget: 1
