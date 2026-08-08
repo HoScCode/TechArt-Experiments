@@ -177,6 +177,9 @@ Shader "PSX/Lit"
             // Ersetzt die Snap Resolution aller Materialien (xy).
             // x <= 1 = aus, Material-Wert gilt.
             float4 _PSX_SnapResolutionOverride;
+            // 1 = erzwungene Textur-Pixelierung aller Materialien deaktivieren
+            // (fuer die "Modern Rendering"-Etappe des Showcase).
+            float _PSX_TexPixelateOff;
 
             struct Attributes
             {
@@ -455,7 +458,9 @@ Shader "PSX/Lit"
                 float2 uv = lerp(input.uvCorrect, uvAffine, saturate(input.affineBlend));
 
                 // --- Optionale Textur-Pixelierung im Shader ---
-                if (_TexPixelate > 0.5)
+                // Kann vom Showcase (Modern-Etappe) global deaktiviert werden
+                if (_TexPixelate > 0.5 &&
+                    !(_PSX_MasterActive > 0.5 && _PSX_TexPixelateOff > 0.5))
                 {
                     float2 res = max(float2(1, 1), _TexPixelateRes.xy);
                     uv = (floor(uv * res) + 0.5) / res;

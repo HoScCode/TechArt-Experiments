@@ -111,6 +111,8 @@ Shader "PSX/Skybox"
             float _PSX_GrainStrength;
             float _PSX_NoiseFps;
             float _PSX_ShadowClean;
+            float _PSX_MasterActive;
+            float _PSX_TexPixelateOff;
 
             struct Attributes
             {
@@ -193,7 +195,9 @@ Shader "PSX/Skybox"
                     float2 uv = DirectionToEquirectUV(dir);
 
                     // Optionale Pixelierung der Panorama-Textur
-                    if (_TexPixelate > 0.5)
+                    // (vom Showcase in der Modern-Etappe deaktivierbar)
+                    if (_TexPixelate > 0.5 &&
+                        !(_PSX_MasterActive > 0.5 && _PSX_TexPixelateOff > 0.5))
                     {
                         float2 res = max(float2(2, 2), _TexPixelateRes.xy);
                         uv = (floor(uv * res) + 0.5) / res;
